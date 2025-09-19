@@ -2,7 +2,6 @@ import streamlit as st
 import re
 import shutil
 from pathlib import Path
-from collections import defaultdict
 from typing import List, Tuple, Dict, Optional, Set
 import os
 import tempfile
@@ -12,35 +11,40 @@ import io
 def parse_prompts(uploaded_file: io.TextIOWrapper) -> List[Tuple[Optional[str], str]]:
     """
     Parses an uploaded text file to extract prompts and optional image URLs.
-
+    Handles multi-line prompts and URL references.
+    
     Args:
         uploaded_file: An uploaded file object from st.file_uploader.
-
+    
     Returns:
-        A list of tuples, where each tuple contains an optional URL (str)
-        and the prompt text (str).
+        A list of tuples, where each tuple contains an optional image URL (str) and
+        the corresponding prompt text (str).
     """
-    prompts = []
-    current_prompt = ""
     lines = uploaded_file.getvalue().decode("utf-8").splitlines()
-
+    
+    prompts = []
+    buffer = ""
     for line in lines:
         line = line.strip()
         if not line:
             continue
-
-        url_match = re.match(r'^(https?://\S+\.png)', line)
-        num_match = re.match(r'^(\d+)', line)
-
-        if url_match or num_match:
-            if current_prompt:
-                prompts.append(current_prompt.strip())
-            current_prompt = line
+        
+        # Check for a new prompt starting with a number
+        match = re.match(r'^(\d+)(.+)', line)
+        if match:
+            if buffer: 
+                prompts.append(buffer.strip())
+            buffer = match.group(2).strip()
+            buffer = match.group(1) + " " + buffer  # Keep number with prompt
+        elif re.match(r'^https?://', line):
+            # If the line is a URL, glue it to the current buffer
+            buffer += " " + line.strip()
         else:
-            current_prompt += " " + line
-
-    if current_prompt:
-        prompts.append(current_prompt.strip())
+            # If the line is a continuation of the previous prompt
+            buffer += " " + line.strip()
+            
+    if buffer:
+        prompts.append(buffer.strip())
 
     cleaned_prompts = []
     for prompt in prompts:
@@ -49,80 +53,96 @@ def parse_prompts(uploaded_file: io.TextIOWrapper) -> List[Tuple[Optional[str], 
             cleaned_prompts.append((m.group(1).strip(), m.group(2).strip()))
         else:
             cleaned_prompts.append((None, prompt))
-
+    
+    st.info(f"Loaded {len(cleaned_prompts)} prompts.")
     return cleaned_prompts
 
 def find_image_files(images_dir: Path, prefix: str, ext: str) -> Dict[str, Path]:
     """
-    Finds image files matching a prefix and extension in a temporary directory.
-
+    Scans a directory for image files that match a specific prefix and extension.
+    
     Args:
-        images_dir: Path to the temporary directory containing images.
-        prefix: The required filename prefix.
-        ext: The required filename extension.
-
+        images_dir (Path): The path to the directory containing images.
+        prefix (str): The required filename prefix.
+        ext (str): The required filename extension.
+        
     Returns:
-        A dictionary mapping the cleaned filename stem (without prefix/ext) to its full Path object.
+        dict: A dictionary mapping the cleaned filename stem to its full Path object.
     """
     files = {}
     if not images_dir.is_dir():
         st.error(f"ERROR: Images directory '{images_dir}' not found.")
         return files
-
+        
     for fpath in images_dir.glob(f"{prefix}*{ext}"):
-        stem = fpath.stem[len(prefix):].lower()
+        stem = fpath.stem.lower()
         files[stem] = fpath
-
+            
+    st.info(f"Found {len(files)} images with prefix '{prefix}' and extension '{ext}'.")
     return files
 
-def map_prompts_to_images(prompts: List[Tuple[Optional[str], str]], files: Dict[str, Path]) -> Tuple[List, Set[Path], List]:
+def map_prompts_to_images(prompts: List[Tuple[Optional[str], str]], files: Dict[str, Path], prefix: str) -> Tuple[List, Set[Path], List]:
     """
-    Maps prompts to image files using a defined matching strategy.
-
+    Maps prompts to image files using a multi-tiered matching strategy.
+    
     Args:
-        prompts: A list of prompts and optional URLs.
-        files: A dictionary of available image files.
-
-    Returns:
-        A tuple containing:
-        - A list of mapped tuples: (target_name, source_path, prompt)
-        - A set of paths for images that were not used.
-        - A list of prompts that could not be matched.
-    """
-    used_files: Set[Path] = set()
-    mapping: List[Tuple[str, Optional[Path], str]] = []
-    missing_prompts: List[str] = []
-    
-    available_files = {stem: p for stem, p in files.items()}
-    
-    seq_width = max(3, len(str(len(prompts))))
-    
-    for i, (img_url, prompt) in enumerate(prompts):
-        target_name = f"{str(i + 1).zfill(seq_width)}.png"
-        found_path = None
+        prompts (list): A list of tuples containing (url, prompt_text).
+        files (dict): A dictionary of available image files.
+        prefix (str): The filename prefix to consider for numeric matching.
         
-        # Strategy 1: Numeric ID matching
-        num_match = re.search(r'\b(\d+)\b', prompt)
-        if num_match:
-            prompt_num = num_match.group(1)
-            if prompt_num in available_files:
-                found_path = available_files.pop(prompt_num)
-                
-        # Strategy 2: URL Stem matching
-        if not found_path and img_url:
-            url_stem = Path(img_url).stem.lower()
-            if url_stem in available_files:
-                found_path = available_files.pop(url_stem)
-
-        if found_path:
-            mapping.append((target_name, found_path, prompt))
-            used_files.add(found_path)
-        else:
-            mapping.append((target_name, None, prompt))
-            missing_prompts.append(prompt)
-
-    unused_files = set(files.values()) - used_files
+    Returns:
+        tuple: A tuple containing the mapping list, a set of unused file paths, and a list of missing prompts.
+    """
+    used_stems = set()
+    mapping = []
+    missing_prompts = []
     
+    seq = 1
+    width = max(3, len(str(len(prompts))))
+    
+    # Create a copy of available files to modify during the process
+    available_files = {stem: fname for stem, fname in files.items()}
+
+    for img_url, prompt in prompts:
+        target_name = f"{str(seq).zfill(width)}.png"
+        found_file = None
+
+        # Strategy 1: Numeric ID Matching
+        # This is the most reliable strategy.
+        prompt_num_match = re.match(r'^(\d+)', prompt)
+        if prompt_num_match:
+            prompt_num = prompt_num_match.group(1)
+            img_stem_to_find = f"{prefix.lower()}{prompt_num}"
+            if img_stem_to_find in available_files:
+                found_file = available_files.pop(img_stem_to_find)
+        
+        # Strategy 2: URL Stem Matching
+        # Used if Strategy 1 fails and a URL is present.
+        if not found_file and img_url:
+            url_stem = Path(img_url).stem.lower()
+            # Find the full stem from the available files dictionary
+            full_url_stem = next((stem for stem in available_files if url_stem in stem), None)
+            if full_url_stem:
+                found_file = available_files.pop(full_url_stem)
+
+        # Strategy 3: Fuzzy Substring Matching (fallback)
+        # Used if both of the above fail.
+        if not found_file:
+            for stem, fname in list(available_files.items()):
+                if (stem in prompt.lower() or prompt.lower() in stem) and stem not in used_stems:
+                    found_file = available_files.pop(stem)
+                    break
+
+        if found_file:
+            mapping.append((target_name, found_file, prompt))
+            used_stems.add(Path(found_file).stem.lower())
+        else:
+            mapping.append(('(missing)', None, prompt))
+            missing_prompts.append(prompt)
+        seq += 1
+        
+    st.info(f"Mapped {len(mapping) - len(missing_prompts)} prompts to images, with {len(missing_prompts)} missing.")
+    unused_files = set(files.values()) - set(used_stems)
     return mapping, unused_files, missing_prompts
 
 def create_zip_archive(output_dir: Path) -> bytes:
@@ -187,17 +207,17 @@ if st.button("Run Image Organizer"):
                     f.write(uploaded_file.getbuffer())
 
             # Perform the organization and renaming
-            st.info("Reading prompts...")
-            prompts = parse_prompts(prompts_file)
+            with st.spinner("Reading prompts..."):
+                prompts = parse_prompts(prompts_file)
             
-            st.info("Scanning for images...")
-            image_files_on_disk = find_image_files(temp_images_dir, prefix, ext)
+            with st.spinner("Scanning for images..."):
+                image_files_on_disk = find_image_files(temp_images_dir, prefix, ext)
             if not image_files_on_disk:
                 st.error("No images found with the specified prefix and extension.")
                 raise FileNotFoundError
                 
-            st.info("Mapping prompts to images...")
-            mapping, unused_files, missing_prompts = map_prompts_to_images(prompts, image_files_on_disk)
+            with st.spinner("Mapping prompts to images..."):
+                mapping, unused_files, missing_prompts = map_prompts_to_images(prompts, image_files_on_disk, prefix)
             
             if dry_run:
                 st.warning("--- Dry Run: No files will be moved or copied. ---")
