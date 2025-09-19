@@ -5,13 +5,16 @@ from pathlib import Path
 from collections import defaultdict
 from typing import List, Tuple, Dict, Optional, Set
 import os
+import tempfile
+import zipfile
+import io
 
-def parse_prompts(prompts_path: Path) -> List[Tuple[Optional[str], str]]:
+def parse_prompts(uploaded_file: io.TextIOWrapper) -> List[Tuple[Optional[str], str]]:
     """
-    Parses a text file to extract prompts and optional image URLs.
+    Parses an uploaded text file to extract prompts and optional image URLs.
 
     Args:
-        prompts_path: Path to the prompts file.
+        uploaded_file: An uploaded file object from st.file_uploader.
 
     Returns:
         A list of tuples, where each tuple contains an optional URL (str)
@@ -19,12 +22,7 @@ def parse_prompts(prompts_path: Path) -> List[Tuple[Optional[str], str]]:
     """
     prompts = []
     current_prompt = ""
-    try:
-        with open(prompts_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-    except FileNotFoundError:
-        st.error(f"ERROR: Prompts file '{prompts_path}' not found.")
-        return []
+    lines = uploaded_file.getvalue().decode("utf-8").splitlines()
 
     for line in lines:
         line = line.strip()
@@ -35,12 +33,10 @@ def parse_prompts(prompts_path: Path) -> List[Tuple[Optional[str], str]]:
         num_match = re.match(r'^(\d+)', line)
 
         if url_match or num_match:
-            # New prompt starts with a number or a URL
             if current_prompt:
                 prompts.append(current_prompt.strip())
             current_prompt = line
         else:
-            # Continuation of the previous prompt
             current_prompt += " " + line
 
     if current_prompt:
@@ -58,10 +54,10 @@ def parse_prompts(prompts_path: Path) -> List[Tuple[Optional[str], str]]:
 
 def find_image_files(images_dir: Path, prefix: str, ext: str) -> Dict[str, Path]:
     """
-    Finds image files matching a prefix and extension in a directory.
+    Finds image files matching a prefix and extension in a temporary directory.
 
     Args:
-        images_dir: Path to the directory containing images.
+        images_dir: Path to the temporary directory containing images.
         prefix: The required filename prefix.
         ext: The required filename extension.
 
@@ -129,100 +125,37 @@ def map_prompts_to_images(prompts: List[Tuple[Optional[str], str]], files: Dict[
     
     return mapping, unused_files, missing_prompts
 
-def organize_and_rename(prompts_path: Path, images_dir: Path, output_dir: Path,
-                        prefix: str, ext: str, move: bool, dry_run: bool):
+def create_zip_archive(output_dir: Path) -> bytes:
     """
-    Main function to orchestrate the entire process via a Streamlit UI.
+    Creates a zip archive of the files in the output directory.
     """
-    st.info(f"Reading prompts from '{prompts_path}'...")
-    prompts = parse_prompts(prompts_path)
-    if not prompts:
-        return
+    buffer = io.BytesIO()
+    with zipfile.ZipFile(buffer, 'w', zipfile.ZIP_DEFLATED) as zipf:
+        for file in output_dir.iterdir():
+            zipf.write(file, arcname=file.name)
+    return buffer.getvalue()
 
-    st.info(f"Scanning for images in '{images_dir}'...")
-    image_files = find_image_files(images_dir, prefix, ext)
-    if not image_files:
-        return
+def delete_temp_files(temp_dirs: List[Path]):
+    """
+    Deletes the specified temporary directories.
+    """
+    for d in temp_dirs:
+        if d.is_dir():
+            shutil.rmtree(d)
+    st.session_state.temp_dirs = []
+    st.success("Temporary files have been deleted.")
 
-    st.info("Mapping prompts to images...")
-    mapping, unused_files, missing_prompts = map_prompts_to_images(prompts, image_files)
-
-    if dry_run:
-        st.warning("\n--- Dry Run: No files will be modified. ---")
-    else:
-        st.info(f"Creating output directory '{output_dir}'...")
-        output_dir.mkdir(parents=True, exist_ok=True)
-
-    st.info("Processing files...")
-    progress_bar = st.progress(0)
+# Initialize session state for temporary directories
+if 'temp_dirs' not in st.session_state:
+    st.session_state.temp_dirs = []
     
-    report_path = output_dir / "report.txt"
-    with open(report_path, "w", encoding="utf-8") as report:
-        report.write("### Image Renaming and Organization Report ###\n\n")
-        
-        # Section 1: Successful Matches
-        report.write("--- Successfully Mapped Prompts ---\n")
-        processed_count = 0
-        total_items = len(mapping)
-        
-        for i, (target_name, found_path, prompt) in enumerate(mapping):
-            progress_bar.progress((i + 1) / total_items)
-            if found_path:
-                src = found_path
-                dst = output_dir / target_name
-                
-                if not dry_run:
-                    if move:
-                        shutil.move(src, dst)
-                    else:
-                        shutil.copy2(src, dst)
-                
-                report.write(f"PROCESSED: {src.name} -> {dst.name}\nPrompt: {prompt}\n\n")
-                processed_count += 1
-            else:
-                report.write(f"MISSED:    (No match for '{prompt}')\n\n")
-                
-        # Section 2: Unused Files
-        report.write("\n--- Unused Image Files ---\n")
-        if unused_files:
-            for fpath in unused_files:
-                report.write(f"UNUSED:    {fpath.name}\n")
-        else:
-            report.write("No unused image files found.\n")
-            
-        # Section 3: Missing Prompts
-        report.write("\n--- Missing Prompts (No Image Match Found) ---\n")
-        if missing_prompts:
-            for prompt in missing_prompts:
-                report.write(f"MISSING:   {prompt}\n")
-        else:
-            report.write("All prompts were matched with an image.\n")
-
-    st.success("--- Summary ---")
-    st.write(f"Total prompts processed: **{len(prompts)}**")
-    st.write(f"Successfully mapped images: **{processed_count}**")
-    st.write(f"Missing prompts: **{len(missing_prompts)}**")
-    st.write(f"Unused images: **{len(unused_files)}**")
-    st.write(f"Detailed report saved to: `{report_path}`")
-    
-    if dry_run:
-        st.warning("Note: This was a dry run. No files were actually changed.")
-
 st.title("Image Organizer & Renamer")
-st.markdown("Use this app to organize and rename your images based on a list of prompts. "
-            "It is a web-based version of the command-line tool I created for you.")
+st.markdown("Use this app to organize and rename your images based on a list of prompts.")
 st.markdown("---")
 
-st.header("1. Setup")
-st.info("Before running, make sure you have the following in the same directory as this script:")
-st.markdown("- A text file containing your prompts (e.g., `prompts.txt`).")
-st.markdown("- A folder with the images you want to organize (e.g., `images/`).")
-st.markdown("The script will create a new folder for the output.")
-
-st.header("2. Configure Options")
-prompts_path = st.text_input("Prompts file path:", "prompts.txt")
-images_dir = st.text_input("Source images directory:", "images")
-output_dir = st.text_input("Output directory:", "output")
+st.header("1. Upload Files")
+prompts_file = st.file_uploader("Upload Prompts File (e.g., prompts.txt)", type=['txt'])
+image_files = st.file_uploader("Upload Images (PNG files)", type=['png'], accept_multiple_files=True)
 
 col1, col2 = st.columns(2)
 with col1:
@@ -231,16 +164,108 @@ with col2:
     ext = st.text_input("Image filename extension:", ".png")
 
 st.markdown("---")
-st.header("3. Run the Process")
+st.header("2. Run the Process")
 st.subheader("Action")
 move_files = st.checkbox("Move files instead of copying them", help="If unchecked, files are copied, leaving the originals in place.")
-dry_run = st.checkbox("Dry Run", help="Simulate the process without modifying any files. A detailed report will still be generated.")
+dry_run = st.checkbox("Dry Run", help="Simulate the process without modifying any files.")
 
 if st.button("Run Image Organizer"):
     st.markdown("---")
-    st.header("4. Results")
-    try:
-        organize_and_rename(Path(prompts_path), Path(images_dir), Path(output_dir), 
-                            prefix, ext, move_files, dry_run)
-    except Exception as e:
-        st.error(f"An unexpected error occurred: {e}")
+    st.header("3. Results")
+    if not prompts_file or not image_files:
+        st.error("Please upload both a prompts file and at least one image file to continue.")
+    else:
+        try:
+            # Create temporary directories for processing
+            temp_images_dir = Path(tempfile.mkdtemp())
+            temp_output_dir = Path(tempfile.mkdtemp())
+            st.session_state.temp_dirs.extend([temp_images_dir, temp_output_dir])
+
+            # Save uploaded files to the temporary directory
+            for uploaded_file in image_files:
+                with open(temp_images_dir / uploaded_file.name, "wb") as f:
+                    f.write(uploaded_file.getbuffer())
+
+            # Perform the organization and renaming
+            st.info("Reading prompts...")
+            prompts = parse_prompts(prompts_file)
+            
+            st.info("Scanning for images...")
+            image_files_on_disk = find_image_files(temp_images_dir, prefix, ext)
+            if not image_files_on_disk:
+                st.error("No images found with the specified prefix and extension.")
+                raise FileNotFoundError
+                
+            st.info("Mapping prompts to images...")
+            mapping, unused_files, missing_prompts = map_prompts_to_images(prompts, image_files_on_disk)
+            
+            if dry_run:
+                st.warning("--- Dry Run: No files will be moved or copied. ---")
+            
+            st.info("Processing files...")
+            progress_bar = st.progress(0)
+            processed_count = 0
+            total_items = len(mapping)
+
+            with open(temp_output_dir / "report.txt", "w", encoding="utf-8") as report:
+                report.write("### Image Renaming and Organization Report ###\n\n")
+                report.write("--- Successfully Mapped Prompts ---\n")
+                
+                for i, (target_name, found_path, prompt) in enumerate(mapping):
+                    progress_bar.progress((i + 1) / total_items)
+                    if found_path:
+                        src = found_path
+                        dst = temp_output_dir / target_name
+                        
+                        if not dry_run:
+                            if move_files:
+                                shutil.move(src, dst)
+                            else:
+                                shutil.copy2(src, dst)
+                        
+                        report.write(f"PROCESSED: {src.name} -> {dst.name}\nPrompt: {prompt}\n\n")
+                        processed_count += 1
+                    else:
+                        report.write(f"MISSED:    (No match for '{prompt}')\n\n")
+                
+                report.write("\n--- Unused Image Files ---\n")
+                if unused_files:
+                    for fpath in unused_files:
+                        report.write(f"UNUSED:    {fpath.name}\n")
+                else:
+                    report.write("No unused image files found.\n")
+                    
+                report.write("\n--- Missing Prompts (No Image Match Found) ---\n")
+                if missing_prompts:
+                    for prompt in missing_prompts:
+                        report.write(f"MISSING:   {prompt}\n")
+                else:
+                    report.write("All prompts were matched with an image.\n")
+
+            st.success("--- Summary ---")
+            st.write(f"Total prompts processed: **{len(prompts)}**")
+            st.write(f"Successfully mapped images: **{processed_count}**")
+            st.write(f"Missing prompts: **{len(missing_prompts)}**")
+            st.write(f"Unused images: **{len(unused_files)}**")
+            
+            if not dry_run:
+                zip_data = create_zip_archive(temp_output_dir)
+                st.download_button(
+                    label="Download Organized Images & Report",
+                    data=zip_data,
+                    file_name="organized_images.zip",
+                    mime="application/zip"
+                )
+            
+            if dry_run:
+                st.warning("Note: This was a dry run. No files were actually changed.")
+
+        except Exception as e:
+            st.error(f"An unexpected error occurred: {e}")
+
+st.markdown("---")
+if st.button("Delete Temporary Files"):
+    if st.session_state.temp_dirs:
+        delete_temp_files(st.session_state.temp_dirs)
+    else:
+        st.info("No temporary files to delete.")
