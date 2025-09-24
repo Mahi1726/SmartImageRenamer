@@ -1,113 +1,61 @@
 import streamlit as st
-import cv2
 import os
-import tempfile
 import zipfile
+import tempfile
 import shutil
-import difflib
-from skimage.metrics import structural_similarity as ssim
-import numpy as np
 
-# --- Helper: fuzzy match between filename and prompt ---
-def fuzzy_match(target, candidates, cutoff=0.6):
-    """Return the best fuzzy match for target among candidates."""
-    best_match = None
-    best_score = 0.0
-    for cand in candidates:
-        score = difflib.SequenceMatcher(None, target.lower(), cand.lower()).ratio()
-        if score > best_score and score >= cutoff:
-            best_score = score
-            best_match = cand
-    return best_match, best_score
+st.title("📸 Smart Image Renamer")
+st.write("Upload images and a prompts file, and get them renamed with a mapping file.")
 
+# File upload widgets
+uploaded_images = st.file_uploader("Upload images", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+uploaded_prompts = st.file_uploader("Upload prompts.txt", type=["txt"])
 
-# --- Streamlit UI ---
-st.title("🎥 SmartVideoRenamer with Fuzzy Matching")
-st.write("Upload reference images and videos. The app will rename videos by matching their first frame to the most similar image. Now with **fuzzy filename matching** so small text differences won’t break things!")
-
-image_files = st.file_uploader("Upload reference images (.png)", type=["png"], accept_multiple_files=True)
-video_files = st.file_uploader("Upload videos (.mp4)", type=["mp4"], accept_multiple_files=True)
-
-if image_files and video_files:
-    if st.button("🚀 Process and Rename Videos"):
+if uploaded_images and uploaded_prompts:
+    if st.button("🚀 Rename Images"):
         with tempfile.TemporaryDirectory() as tmpdir:
-            image_dir = os.path.join(tmpdir, "images")
-            video_dir = os.path.join(tmpdir, "videos")
-            os.makedirs(image_dir, exist_ok=True)
-            os.makedirs(video_dir, exist_ok=True)
+            # Save prompts.txt
+            prompts_path = os.path.join(tmpdir, "prompts.txt")
+            with open(prompts_path, "wb") as f:
+                f.write(uploaded_prompts.read())
+            
+            # Load prompts
+            with open(prompts_path, "r", encoding="utf-8") as f:
+                prompts = [line.strip() for line in f if line.strip()]
 
-            # Save uploaded images
-            for file in image_files:
-                with open(os.path.join(image_dir, file.name), "wb") as f:
-                    f.write(file.read())
+            renamed_dir = os.path.join(tmpdir, "renamed")
+            os.makedirs(renamed_dir, exist_ok=True)
 
-            # Save uploaded videos
-            for file in video_files:
-                with open(os.path.join(video_dir, file.name), "wb") as f:
-                    f.write(file.read())
+            mapping_lines = []
 
-            # Load images
-            images = {}
-            for fname in os.listdir(image_dir):
-                if fname.endswith(".png"):
-                    img = cv2.imread(os.path.join(image_dir, fname))
-                    img = cv2.resize(img, (256, 256))
-                    images[fname] = img
+            for idx, img_file in enumerate(uploaded_images, start=1):
+                ext = os.path.splitext(img_file.name)[1].lower()
+                new_name = f"{idx:03d}{ext}"
+                new_path = os.path.join(renamed_dir, new_name)
 
-            renamed = []
-            skipped = []
+                # Save image
+                with open(new_path, "wb") as f:
+                    f.write(img_file.read())
 
-            # Process videos
-            for vfile in os.listdir(video_dir):
-                if not vfile.endswith(".mp4"):
-                    continue
-                vpath = os.path.join(video_dir, vfile)
-                cap = cv2.VideoCapture(vpath)
-                ret, frame = cap.read()
-                cap.release()
-                if not ret:
-                    skipped.append(vfile)
-                    continue
+                prompt = prompts[idx - 1] if idx - 1 < len(prompts) else "NO PROMPT"
+                mapping_lines.append(f"{new_name} | {img_file.name} | {prompt}")
 
-                frame = cv2.resize(frame, (256, 256))
+            # Save mapping.txt
+            mapping_path = os.path.join(renamed_dir, "mapping.txt")
+            with open(mapping_path, "w", encoding="utf-8") as f:
+                f.write("\n".join(mapping_lines))
 
-                best_match = None
-                best_score = -1
-
-                for img_name, img in images.items():
-                    grayA = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-                    grayB = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-                    score, _ = ssim(grayA, grayB, full=True)
-                    if score > best_score:
-                        best_score = score
-                        best_match = img_name
-
-                if best_match:
-                    # Fuzzy match filename to prompt name (ignoring suffixes)
-                    prompt_base = os.path.splitext(best_match)[0]
-                    new_name, text_score = fuzzy_match(prompt_base, [os.path.splitext(vfile)[0]])
-                    if not new_name:  # fallback: just use image filename
-                        new_name = prompt_base
-                    final_name = new_name + ".mp4"
-
-                    new_path = os.path.join(video_dir, final_name)
-                    os.rename(vpath, new_path)
-                    renamed.append(f"{vfile} → {final_name} (ssim={best_score:.2f}, text={text_score:.2f})")
-
-            # Zip renamed videos
-            zip_path = os.path.join(tmpdir, "renamed_videos.zip")
+            # Create ZIP for download
+            zip_path = os.path.join(tmpdir, "renamed_images.zip")
             with zipfile.ZipFile(zip_path, "w") as zipf:
-                for vfile in os.listdir(video_dir):
-                    zipf.write(os.path.join(video_dir, vfile), vfile)
+                for root, _, files in os.walk(renamed_dir):
+                    for file in files:
+                        zipf.write(os.path.join(root, file), file)
 
-            st.success("✅ Processing complete!")
-            st.download_button("⬇️ Download Renamed Videos (ZIP)", data=open(zip_path, "rb"), file_name="renamed_videos.zip")
-
-            if renamed:
-                st.subheader("Renamed Files")
-                for line in renamed:
-                    st.text(line)
-            if skipped:
-                st.subheader("Skipped Videos")
-                for s in skipped:
-                    st.text(s)
+            with open(zip_path, "rb") as f:
+                st.download_button(
+                    label="⬇️ Download Renamed Images + Mapping",
+                    data=f,
+                    file_name="renamed_images.zip",
+                    mime="application/zip"
+                )
