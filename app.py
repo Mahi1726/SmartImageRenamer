@@ -1,35 +1,38 @@
 import streamlit as st
 import os
-from zipfile import ZipFile
 import tempfile
 import pandas as pd
 from difflib import get_close_matches
+from PIL import Image
 
-st.title("MidJourney Image Renamer + Skip Missing Images 🚢➡️001,002…")
+st.title("MidJourney Image Renamer 📸➡️001,002… (Direct Upload)")
 
 # Upload prompts
 prompts_file = st.file_uploader("Upload your prompts.txt", type=["txt"])
-# Upload images as zip
-images_zip = st.file_uploader("Upload your images as a ZIP", type=["zip"])
+# Upload multiple images directly
+uploaded_images = st.file_uploader("Upload your images", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
-if prompts_file and images_zip:
+if prompts_file and uploaded_images:
     # Read prompts
     prompts = [line.strip().replace("___ar_16:9___v_6___style_raw", "") 
                for line in prompts_file.read().decode("utf-8").splitlines() if line.strip()]
 
-    # Temporary folder to extract images
+    # Temporary folder to save images
     temp_dir = tempfile.mkdtemp()
-    with ZipFile(images_zip, "r") as zip_ref:
-        zip_ref.extractall(temp_dir)
+    
+    # Save uploaded images to temp folder
+    images = []
+    for file in uploaded_images:
+        file_path = os.path.join(temp_dir, file.name)
+        with open(file_path, "wb") as f:
+            f.write(file.read())
+        images.append(file.name)
 
-    # List PNG images
-    images = [f for f in os.listdir(temp_dir) if f.lower().endswith(".png")]
-
-    # Prepare mapping: remove UUID-like suffixes
+    # Map images using descriptive part
     image_map = {}
     for img in images:
         parts = img.split("_")
-        desc_part = "_".join(parts[1:-2]).lower()  # remove first and last UUID-like parts
+        desc_part = "_".join(parts[1:-2]).lower()  # remove prefix + UUID suffix
         image_map[desc_part] = img
 
     mapping_data = []
@@ -37,19 +40,29 @@ if prompts_file and images_zip:
     for idx, prompt in enumerate(prompts, start=1):
         key = "_".join(prompt.split("_")[:10]).lower()
         match = get_close_matches(key, image_map.keys(), n=1, cutoff=0.1)
+        
         if match:
             orig_name = image_map[match[0]]
-            new_name = f"{idx:03d}.png"
-            os.rename(os.path.join(temp_dir, orig_name), os.path.join(temp_dir, new_name))
-            mapping_data.append({
-                "Prompt_Number": idx,
-                "Prompt": prompt,
-                "Original_File": orig_name,
-                "New_File": new_name,
-                "Status": "Renamed"
-            })
+            orig_path = os.path.join(temp_dir, orig_name)
+            if os.path.exists(orig_path):
+                new_name = f"{idx:03d}.png"
+                os.rename(orig_path, os.path.join(temp_dir, new_name))
+                mapping_data.append({
+                    "Prompt_Number": idx,
+                    "Prompt": prompt,
+                    "Original_File": orig_name,
+                    "New_File": new_name,
+                    "Status": "Renamed"
+                })
+            else:
+                mapping_data.append({
+                    "Prompt_Number": idx,
+                    "Prompt": prompt,
+                    "Original_File": orig_name,
+                    "New_File": "",
+                    "Status": "Missing File"
+                })
         else:
-            # Skip missing image but keep number in mapping
             mapping_data.append({
                 "Prompt_Number": idx,
                 "Prompt": prompt,
@@ -64,8 +77,9 @@ if prompts_file and images_zip:
     mapping_df.to_csv(mapping_csv_path, index=False)
 
     # Zip renamed images + mapping file
+    import zipfile
     zip_path = os.path.join(temp_dir, "renamed_images.zip")
-    with ZipFile(zip_path, "w") as zipf:
+    with zipfile.ZipFile(zip_path, "w") as zipf:
         for file in os.listdir(temp_dir):
             zipf.write(os.path.join(temp_dir, file), arcname=file)
 
