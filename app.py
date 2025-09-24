@@ -1,18 +1,19 @@
 import streamlit as st
+from io import BytesIO
+from zipfile import ZipFile
 import os
-import shutil
 
 st.title("Image Renamer with Prompts")
 
-# Input folder path
-image_folder = st.text_input("Enter path to image folder", "")
+# Upload multiple images
+uploaded_images = st.file_uploader("Upload images", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
 # Upload prompts file
-prompts_file = st.file_uploader("Upload prompts.txt or mapping file", type=["txt"])
+prompts_file = st.file_uploader("Upload prompts file", type=["txt"])
 
 if st.button("Rename Images"):
-    if not image_folder or not prompts_file:
-        st.error("Please provide both the image folder and the prompts file.")
+    if not uploaded_images or not prompts_file:
+        st.error("Please upload both images and a prompts file.")
     else:
         # Read prompts
         prompts = prompts_file.read().decode("utf-8").splitlines()
@@ -22,32 +23,40 @@ if st.button("Rename Images"):
             if len(parts) >= 2:
                 prompt_dict[parts[1].strip()] = parts[2].strip() if len(parts) > 2 else parts[1].strip()
 
-        # Get all images in folder
-        images = [f for f in os.listdir(image_folder) if f.lower().endswith((".png", ".jpg", ".jpeg"))]
-        images.sort()  # Initial order
+        # Sort uploaded images by filename
+        uploaded_images.sort(key=lambda x: x.name)
 
-        renamed_folder = os.path.join(image_folder, "renamed")
-        os.makedirs(renamed_folder, exist_ok=True)
+        renamed_files = []
 
-        used_prompts = set()
-        count = 1
-
-        for img in images:
+        for count, img_file in enumerate(uploaded_images, start=1):
             matched_prompt = None
-            for prompt_name, prompt_text in prompt_dict.items():
-                img_base = os.path.splitext(img)[0]
+            img_base = os.path.splitext(img_file.name)[0]
+            for prompt_name in prompt_dict.keys():
+                # Check if first few words match
                 prompt_base = "_".join(prompt_name.split("_")[:5])
-                if prompt_base in img_base and prompt_name not in used_prompts:
+                if prompt_base in img_base:
                     matched_prompt = prompt_name
-                    used_prompts.add(prompt_name)
                     break
 
             if matched_prompt:
                 new_name = f"{count:03}.png"
-                shutil.copy(os.path.join(image_folder, img), os.path.join(renamed_folder, new_name))
-                st.write(f"{img} ➔ {new_name}")
-                count += 1
+                renamed_files.append((new_name, img_file.getvalue()))
             else:
-                st.warning(f"No match found for {img}")
+                # If no match, just keep original name but numbered
+                new_name = f"{count:03}_{img_file.name}"
+                renamed_files.append((new_name, img_file.getvalue()))
 
-        st.success(f"Renaming done! Renamed images are in {renamed_folder}")
+        # Create a ZIP file for download
+        zip_buffer = BytesIO()
+        with ZipFile(zip_buffer, "w") as zip_file:
+            for file_name, data in renamed_files:
+                zip_file.writestr(file_name, data)
+
+        st.download_button(
+            label="Download Renamed Images",
+            data=zip_buffer.getvalue(),
+            file_name="renamed_images.zip",
+            mime="application/zip"
+        )
+
+        st.success("Images renamed and ready for download!")
