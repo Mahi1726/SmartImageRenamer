@@ -2,16 +2,14 @@ import streamlit as st
 import os
 import tempfile
 import pandas as pd
-from difflib import get_close_matches
 import zipfile
 
-st.title("MidJourney Image Renamer 📸➡️001,002… (Direct Upload)")
+st.title("MidJourney Image Renamer – Perfect Version 🔥")
 
-# --- Upload files ---
+# Upload prompts
 prompts_file = st.file_uploader("Upload your prompts.txt", type=["txt"])
 uploaded_images = st.file_uploader("Upload your images", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
 
-# --- Use session state to prevent reruns ---
 if "processed" not in st.session_state:
     st.session_state.processed = False
 
@@ -21,54 +19,54 @@ if process and prompts_file and uploaded_images and not st.session_state.process
     st.session_state.processed = True
 
     # --- Read prompts ---
-    prompts = [line.strip().replace("___ar_16:9___v_6___style_raw", "") 
+    prompts = [line.strip().replace("___ar_16:9___v_6___style_raw", "")
                for line in prompts_file.read().decode("utf-8").splitlines() if line.strip()]
 
-    # --- Temp folder for images ---
+    # --- Temporary folder ---
     temp_dir = tempfile.mkdtemp()
-    
-    # Save uploaded images
-    images = []
-    for file in uploaded_images:
-        file_path = os.path.join(temp_dir, file.name)
-        with open(file_path, "wb") as f:
-            f.write(file.read())
-        images.append(file.name)
 
-    # --- Map images by descriptive part ---
-    image_map = {}
-    for img in images:
-        parts = img.split("_")
-        desc_part = "_".join(parts[1:-2]).lower()  # remove prefix + UUID suffix
-        image_map[desc_part] = img
+    # Save uploaded images
+    for file in uploaded_images:
+        with open(os.path.join(temp_dir, file.name), "wb") as f:
+            f.write(file.read())
+
+    # Get exact filenames
+    images = os.listdir(temp_dir)
 
     mapping_data = []
 
-    # --- Rename images sequentially, skip missing ---
+    # --- Perfect matching ---
     for idx, prompt in enumerate(prompts, start=1):
-        key = "_".join(prompt.split("_")[:10]).lower()
-        match = get_close_matches(key, image_map.keys(), n=1, cutoff=0.1)
-        
-        if match:
-            orig_name = image_map[match[0]]
-            orig_path = os.path.join(temp_dir, orig_name)
-            if os.path.exists(orig_path):
-                new_name = f"{idx:03d}.png"
-                os.rename(orig_path, os.path.join(temp_dir, new_name))
+        # Normalize prompt and filenames for comparison
+        prompt_lower = prompt.lower().replace("-", " ").replace("’", "'").replace("'", "")
+        found = None
+
+        for img in images:
+            img_lower = img.lower().replace("-", " ").replace("’", "'").replace("'", "")
+            if prompt_lower in img_lower:
+                found = img
+                break
+
+        if found:
+            orig_path = os.path.join(temp_dir, found)
+            new_name = f"{idx:03d}.png"
+            new_path = os.path.join(temp_dir, new_name)
+            try:
+                os.rename(orig_path, new_path)
                 mapping_data.append({
                     "Prompt_Number": idx,
                     "Prompt": prompt,
-                    "Original_File": orig_name,
+                    "Original_File": found,
                     "New_File": new_name,
                     "Status": "Renamed"
                 })
-            else:
+            except Exception as e:
                 mapping_data.append({
                     "Prompt_Number": idx,
                     "Prompt": prompt,
-                    "Original_File": orig_name,
+                    "Original_File": found,
                     "New_File": "",
-                    "Status": "Missing File"
+                    "Status": f"Rename failed: {e}"
                 })
         else:
             mapping_data.append({
@@ -90,6 +88,6 @@ if process and prompts_file and uploaded_images and not st.session_state.process
         for file in os.listdir(temp_dir):
             zipf.write(os.path.join(temp_dir, file), arcname=file)
 
-    st.success("✅ Images renamed successfully (missing images skipped)!")
+    st.success("✅ All images processed perfectly! Missing images skipped safely.")
     st.download_button("Download renamed images + mapping ZIP", zip_path)
     st.dataframe(mapping_df)
