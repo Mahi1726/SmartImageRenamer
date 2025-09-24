@@ -1,62 +1,65 @@
 import streamlit as st
-from io import BytesIO
-from zipfile import ZipFile
 import os
+from zipfile import ZipFile
+from difflib import get_close_matches
+import tempfile
+import pandas as pd
 
-st.title("Image Renamer with Prompts")
-
-# Upload multiple images
-uploaded_images = st.file_uploader("Upload images", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+st.title("MidJourney Image Renamer 📸➡️001,002,… + Mapping File")
 
 # Upload prompts file
-prompts_file = st.file_uploader("Upload prompts file", type=["txt"])
+prompts_file = st.file_uploader("Upload your prompts.txt", type=["txt"])
 
-if st.button("Rename Images"):
-    if not uploaded_images or not prompts_file:
-        st.error("Please upload both images and a prompts file.")
-    else:
-        # Read prompts
-        prompts = prompts_file.read().decode("utf-8").splitlines()
-        prompt_dict = {}
-        for line in prompts:
-            parts = line.split("|")
-            if len(parts) >= 2:
-                prompt_dict[parts[1].strip()] = parts[2].strip() if len(parts) > 2 else parts[1].strip()
+# Upload images as a zip
+images_zip = st.file_uploader("Upload your images as a ZIP", type=["zip"])
 
-        # Sort uploaded images by filename
-        uploaded_images.sort(key=lambda x: x.name)
+if prompts_file and images_zip:
+    # Read prompts
+    prompts = [line.strip().replace("___ar_16:9___v_6___style_raw", "") 
+               for line in prompts_file.read().decode("utf-8").splitlines() if line.strip()]
 
-        renamed_files = []
+    # Create temporary folder to extract images
+    temp_dir = tempfile.mkdtemp()
+    
+    with ZipFile(images_zip, "r") as zip_ref:
+        zip_ref.extractall(temp_dir)
+    
+    # List PNG images
+    images = [f for f in os.listdir(temp_dir) if f.lower().endswith(".png")]
 
-        for count, img_file in enumerate(uploaded_images, start=1):
-            matched_prompt = None
-            img_base = os.path.splitext(img_file.name)[0]
-            for prompt_name in prompt_dict.keys():
-                # Check if first few words match
-                prompt_base = "_".join(prompt_name.split("_")[:5])
-                if prompt_base in img_base:
-                    matched_prompt = prompt_name
-                    break
+    # Prepare mapping: remove UUID-like suffixes
+    image_map = {}
+    for img in images:
+        parts = img.split("_")
+        desc_part = "_".join(parts[1:-2]).lower()  # remove first and last UUID-like parts
+        image_map[desc_part] = img
 
-            if matched_prompt:
-                new_name = f"{count:03}.png"
-                renamed_files.append((new_name, img_file.getvalue()))
-            else:
-                # If no match, just keep original name but numbered
-                new_name = f"{count:03}_{img_file.name}"
-                renamed_files.append((new_name, img_file.getvalue()))
+    renamed_files = []
+    mapping_data = []
 
-        # Create a ZIP file for download
-        zip_buffer = BytesIO()
-        with ZipFile(zip_buffer, "w") as zip_file:
-            for file_name, data in renamed_files:
-                zip_file.writestr(file_name, data)
+    for idx, prompt in enumerate(prompts, start=1):
+        key = "_".join(prompt.split("_")[:10]).lower()
+        match = get_close_matches(key, image_map.keys(), n=1, cutoff=0.1)
+        if match:
+            orig_name = image_map[match[0]]
+            new_name = f"{idx:03d}.png"
+            os.rename(os.path.join(temp_dir, orig_name), os.path.join(temp_dir, new_name))
+            renamed_files.append(new_name)
+            mapping_data.append({"Prompt_Number": idx, "Prompt": prompt, "Original_File": orig_name, "New_File": new_name})
+        else:
+            st.warning(f"No match found for prompt {idx}: {prompt}")
 
-        st.download_button(
-            label="Download Renamed Images",
-            data=zip_buffer.getvalue(),
-            file_name="renamed_images.zip",
-            mime="application/zip"
-        )
+    # Create mapping CSV
+    mapping_df = pd.DataFrame(mapping_data)
+    mapping_csv_path = os.path.join(temp_dir, "mapping.csv")
+    mapping_df.to_csv(mapping_csv_path, index=False)
 
-        st.success("Images renamed and ready for download!")
+    # Zip renamed files
+    zip_path = os.path.join(temp_dir, "renamed_images.zip")
+    with ZipFile(zip_path, "w") as zipf:
+        for file in renamed_files:
+            zipf.write(os.path.join(temp_dir, file), arcname=file)
+        zipf.write(mapping_csv_path, arcname="mapping.csv")
+
+    st.success("Images renamed successfully with mapping!")
+    st.download_button("Download renamed images + mapping ZIP", zip_path)
