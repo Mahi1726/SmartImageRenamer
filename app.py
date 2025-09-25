@@ -89,8 +89,7 @@ class PromptImageMatcher:
         available_filenames = set(filenames)
         
         for i, prompt in enumerate(prompts, 1):
-            # Store original prompt before cleaning
-            original_prompt = prompt
+            # Remove number prefix if present (e.g., "1. prompt_text" -> "prompt_text")
             prompt_text = re.sub(r'^\d+\.\s*', '', prompt).strip()
             
             candidates = list(available_filenames - used_filenames)
@@ -100,7 +99,6 @@ class PromptImageMatcher:
                 results["matches"].append({
                     "prompt_number": i,
                     "prompt": prompt_text,
-                    "original_prompt": original_prompt,
                     "original_filename": match,
                     "new_filename": f"{i:03d}.png",  # Simple numbered filename
                     "file_data": uploaded_files[match],
@@ -112,7 +110,6 @@ class PromptImageMatcher:
                 results["missing"].append({
                     "prompt_number": i,
                     "prompt": prompt_text,
-                    "original_prompt": original_prompt,
                     "best_score": round(score, 3)
                 })
                 results["summary"]["missing"] += 1
@@ -263,7 +260,6 @@ if st.button("🔍 Match & Prepare Rename", type="primary", use_container_width=
                 missing_df = pd.DataFrame([{
                     "prompt_number": m["prompt_number"],
                     "prompt": m["prompt"],
-                    "original_prompt": m["original_prompt"],
                     "best_score": m["best_score"]
                 } for m in results["missing"]])
                 st.dataframe(
@@ -285,8 +281,7 @@ if 'results' in st.session_state and st.session_state['results']['matches']:
         for match in st.session_state['results']['matches']:
             mapping_data.append({
                 "prompt_number": match["prompt_number"],
-                "original_prompt": match["original_prompt"],
-                "cleaned_prompt": match["prompt"],
+                "prompt": match["prompt"],
                 "original_filename": match["original_filename"],
                 "new_filename": match["new_filename"],
                 "similarity_score": match["similarity_score"]
