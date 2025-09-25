@@ -1,90 +1,121 @@
 import streamlit as st
-import tempfile
 import os
-import shutil
 import re
-import zipfile
-from rapidfuzz import fuzz
+from difflib import SequenceMatcher
+from typing import List, Tuple, Dict, Optional
+import json
+import pandas as pd
+from io import StringIO
 
-st.title("Debug Enhanced Midjourney Prompt-Image Matcher")
-
-prompt_file = st.file_uploader("Upload prompts.txt", type=["txt"])
-image_files = st.file_uploader("Upload PNG images", type=["png"], accept_multiple_files=True)
-
-def clean_text(text):
-    text = text.lower()
-    text = re.sub(r"[’,.'\"-]", "", text)
-    text = re.sub(r"\b[a-f0-9]{8,}\b", "", text)
-    text = re.sub(r"[_\s]+", "_", text).strip("_")
-    return text
-
-def extract_prompt_from_filename(filename):
-    name_part = filename.rsplit("_", 1)[0]
-    return clean_text(name_part)
-
-if prompt_file and image_files:
-    with tempfile.TemporaryDirectory() as tmpdir:
-        prompts = [line.strip() for line in prompt_file if line.strip()]
-        prompts = [p.decode("utf-8") if isinstance(p, bytes) else p for p in prompts]
-
-        image_dir = os.path.join(tmpdir, "images")
-        os.makedirs(image_dir, exist_ok=True)
-
-        for im in image_files:
-            with open(os.path.join(image_dir, im.name), "wb") as f:
-                f.write(im.getbuffer())
-
-        png_files = os.listdir(image_dir)
-        cleaned_filenames = [(fname, extract_prompt_from_filename(fname)) for fname in png_files]
-
-        output_dir = os.path.join(tmpdir, "output_images")
-        os.makedirs(output_dir, exist_ok=True)
-
-        used_images = set()
-        mapping_log = []
-
-        st.subheader("Cleaned Prompts")
-        for p in prompts:
-            st.text(clean_text(p))
-
-        st.subheader("Cleaned Filenames")
-        for fname, clean_fname in cleaned_filenames:
-            st.text(f"{fname} -> {clean_fname}")
-
-        for idx, prompt in enumerate(prompts, 1):
-            clean_prompt = clean_text(prompt)
-
-            # Try direct substring match
-            direct_match = None
-            for fname, cleaned_name in cleaned_filenames:
-                if clean_prompt in cleaned_name and fname not in used_images:
-                    direct_match = fname
-                    break
-
-            matched_file = direct_match
-
-            # Try fuzzy matching if no direct match
-            if not matched_file:
-                candidates = [(fname, cleaned_name) for fname, cleaned_name in cleaned_filenames if fname not in used_images]
-                best_match = None
-                best_score = 0
-                for fname, cleaned_name in candidates:
-                    score = fuzz.ratio(clean_prompt, cleaned_name)
-                    if score > best_score:
-                        best_score = score
-                        best_match = fname
-
-                if best_score >= 70:
-                    matched_file = best_match
-
-            if matched_file:
-                new_name = f"{idx:03}.png"
-                shutil.copy(os.path.join(image_dir, matched_file), os.path.join(output_dir, new_name))
-                mapping_log.append(f"Prompt {idx} → {matched_file} (score: {best_score if not direct_match else 100})")
-                used_images.add(matched_file)
+class PromptImageMatcher:
+    def __init__(self, similarity_threshold: float = 0.85):
+        self.similarity_threshold = similarity_threshold
+        
+    def clean_text(self, text: str) -> str:
+        # Remove UUID patterns
+        text = re.sub(r'[a-f0-9]{8}[-_]?[a-f0-9]{4}[-_]?[a-f0-9]{4}[-_]?[a-f0-9]{4}[-_]?[a-f0-9]{12}', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'[a-f0-9]{6,}', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'\.(png|jpg|jpeg|gif|webp)$', '', text, flags=re.IGNORECASE)
+        text = re.sub(r'^[a-zA-Z0-9]+_', '', text)
+        text = re.sub(r'_+\d*$', '', text)
+        text = re.sub(r'_{2,}', '_', text)
+        text = text.strip('_')
+        return text.lower()
+    
+    def calculate_similarity(self, str1: str, str2: str) -> float:
+        return SequenceMatcher(None, str1, str2).ratio()
+    
+    def extract_prompt_from_filename(self, filename: str) -> str:
+        name_without_ext = os.path.splitext(filename)[0]
+        cleaned = self.clean_text(name_without_ext)
+        return cleaned
+    
+    def find_best_match(self, prompt: str, filenames: List[str]) -> Tuple[Optional[str], float]:
+        cleaned_prompt = self.clean_text(prompt)
+        best_match = None
+        best_score = 0.0
+        
+        for filename in filenames:
+            cleaned_filename = self.extract_prompt_from_filename(filename)
+            
+            if cleaned_prompt in cleaned_filename or cleaned_filename in cleaned_prompt:
+                return filename, 1.0
+            
+            similarity = self.calculate_similarity(cleaned_prompt, cleaned_filename)
+            
+            if similarity > best_score:
+                best_score = similarity
+                best_match = filename
+        
+        if best_score >= self.similarity_threshold:
+            return best_match, best_score
+        
+        return None, best_score
+    
+    def match_prompts_to_images(self, prompts: List[str], image_filenames: List[str]) -> Dict:
+        results = {
+            "matches": [],
+            "missing": [],
+            "summary": {
+                "total_prompts": len(prompts),
+                "matched": 0,
+                "missing": 0
+            }
+        }
+        
+        used_filenames = set()
+        available_filenames = set(image_filenames)
+        
+        for i, prompt in enumerate(prompts, 1):
+            prompt_text = re.sub(r'^\d+\.\s*', '', prompt).strip()
+            
+            candidates = list(available_filenames - used_filenames)
+            match, score = self.find_best_match(prompt_text, candidates)
+            
+            if match:
+                results["matches"].append({
+                    "prompt_number": i,
+                    "prompt": prompt_text,
+                    "image": match,
+                    "similarity_score": round(score, 3)
+                })
+                used_filenames.add(match)
+                results["summary"]["matched"] += 1
             else:
-                mapping_log.append(f"Prompt {idx} → missing")
+                results["missing"].append({
+                    "prompt_number": i,
+                    "prompt": prompt_text,
+                    "best_score": round(score, 3)
+                })
+                results["summary"]["missing"] += 1
+        
+        return results
 
-        st.subheader("Match Log")
-        for log in mapping_log:
-            st.text(log)
+# Streamlit App
+st.set_page_config(
+    page_title="Prompt-Image Matcher",
+    page_icon="🎯",
+    layout="wide"
+)
+
+st.title("🎯 Prompt-Image Matcher")
+st.markdown("Match prompts to their generated images using fuzzy string matching")
+
+# Sidebar for configuration
+with st.sidebar:
+    st.header("⚙️ Configuration")
+    similarity_threshold = st.slider(
+        "Similarity Threshold",
+        min_value=0.0,
+        max_value=1.0,
+        value=0.85,
+        step=0.05,
+        help="Minimum similarity score for fuzzy matching"
+    )
+    
+    st.markdown("---")
+    st.markdown("### 📋 Instructions")
+    st.markdown("""
+    1. **Upload prompts**: Text file with one prompt per line
+    2. **Enter image filenames**: One per line in the text area
+    
