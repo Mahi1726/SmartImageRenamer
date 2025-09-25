@@ -4,25 +4,22 @@ import os
 import shutil
 import re
 import zipfile
-from rapidfuzz import fuzz, process
+from rapidfuzz import fuzz
 
-st.title("Midjourney Prompt-Image Matcher with Fuzzy Matching")
+st.title("Debug Enhanced Midjourney Prompt-Image Matcher")
 
 prompt_file = st.file_uploader("Upload prompts.txt", type=["txt"])
 image_files = st.file_uploader("Upload PNG images", type=["png"], accept_multiple_files=True)
 
 def clean_text(text):
-    # Lowercase and remove UUIDs, special tokens, and trailing numbers nicely
     text = text.lower()
     text = re.sub(r"[’,.'\"-]", "", text)
-    # Remove UUID-like hex sequences (8 or more hex chars)
     text = re.sub(r"\b[a-f0-9]{8,}\b", "", text)
-    # Remove extra underscores and multiple spaces
     text = re.sub(r"[_\s]+", "_", text).strip("_")
     return text
 
 def extract_prompt_from_filename(filename):
-    name_part = filename.rsplit("_", 1)[0]  # remove UUID trailing part
+    name_part = filename.rsplit("_", 1)[0]
     return clean_text(name_part)
 
 if prompt_file and image_files:
@@ -32,6 +29,7 @@ if prompt_file and image_files:
 
         image_dir = os.path.join(tmpdir, "images")
         os.makedirs(image_dir, exist_ok=True)
+
         for im in image_files:
             with open(os.path.join(image_dir, im.name), "wb") as f:
                 f.write(im.getbuffer())
@@ -45,9 +43,18 @@ if prompt_file and image_files:
         used_images = set()
         mapping_log = []
 
+        st.subheader("Cleaned Prompts")
+        for p in prompts:
+            st.text(clean_text(p))
+
+        st.subheader("Cleaned Filenames")
+        for fname, clean_fname in cleaned_filenames:
+            st.text(f"{fname} -> {clean_fname}")
+
         for idx, prompt in enumerate(prompts, 1):
             clean_prompt = clean_text(prompt)
-            # Try direct substring match first
+
+            # Try direct substring match
             direct_match = None
             for fname, cleaned_name in cleaned_filenames:
                 if clean_prompt in cleaned_name and fname not in used_images:
@@ -55,38 +62,29 @@ if prompt_file and image_files:
                     break
 
             matched_file = direct_match
-            # If no direct match, try fuzzy matching with threshold
+
+            # Try fuzzy matching if no direct match
             if not matched_file:
                 candidates = [(fname, cleaned_name) for fname, cleaned_name in cleaned_filenames if fname not in used_images]
-                if candidates:
-                    # Select best fuzzy match
-                    best_match = None
-                    best_score = 0
-                    for fname, cleaned_name in candidates:
-                        score = fuzz.ratio(clean_prompt, cleaned_name)
-                        if score > best_score:
-                            best_score = score
-                            best_match = fname
-                    if best_score >= 85:  # threshold for acceptance
-                        matched_file = best_match
+                best_match = None
+                best_score = 0
+                for fname, cleaned_name in candidates:
+                    score = fuzz.ratio(clean_prompt, cleaned_name)
+                    if score > best_score:
+                        best_score = score
+                        best_match = fname
+
+                if best_score >= 70:
+                    matched_file = best_match
 
             if matched_file:
                 new_name = f"{idx:03}.png"
                 shutil.copy(os.path.join(image_dir, matched_file), os.path.join(output_dir, new_name))
-                mapping_log.append(f"Prompt {idx} → {matched_file}")
+                mapping_log.append(f"Prompt {idx} → {matched_file} (score: {best_score if not direct_match else 100})")
                 used_images.add(matched_file)
             else:
                 mapping_log.append(f"Prompt {idx} → missing")
 
-        # Zip output images
-        out_zip = os.path.join(tmpdir, "renamed_images.zip")
-        with zipfile.ZipFile(out_zip, "w") as zipf:
-            for f in os.listdir(output_dir):
-                zipf.write(os.path.join(output_dir, f), arcname=f)
-
-        mapping_log_text = "\n".join(mapping_log)
-
-        st.download_button("Download Renamed Images ZIP", open(out_zip, "rb"), "renamed_images.zip")
-        st.download_button("Download Matching Log", mapping_log_text, "mapping_log.txt")
-
-        st.success("Matching complete. Download your files above.")
+        st.subheader("Match Log")
+        for log in mapping_log:
+            st.text(log)
