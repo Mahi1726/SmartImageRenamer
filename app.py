@@ -1,93 +1,67 @@
 import streamlit as st
-import os
 import tempfile
-import pandas as pd
-import zipfile
+import shutil
+import os
 
-st.title("MidJourney Image Renamer – Perfect Version 🔥")
+st.title("Midjourney Image-Prompt Renamer")
 
-# Upload prompts
-prompts_file = st.file_uploader("Upload your prompts.txt", type=["txt"])
-uploaded_images = st.file_uploader("Upload your images", type=["png", "jpg", "jpeg"], accept_multiple_files=True)
+prompt_file = st.file_uploader("Upload prompts.txt", type=["txt"])
+image_files = st.file_uploader("Upload PNG images", type=["png"], accept_multiple_files=True)
 
-if "processed" not in st.session_state:
-    st.session_state.processed = False
+if prompt_file and image_files:
+    with tempfile.TemporaryDirectory() as tmpdir:
+        # Load and process prompts
+        prompts = [line.strip() for line in prompt_file if line.strip()]
+        prompts = [p.decode("utf-8") if isinstance(p, bytes) else p for p in prompts]
 
-process = st.button("Process Images")
+        # Save images to temp directory for reference
+        image_dir = os.path.join(tmpdir, "input_images")
+        os.makedirs(image_dir, exist_ok=True)
+        for file in image_files:
+            filepath = os.path.join(image_dir, file.name)
+            with open(filepath, "wb") as f_out:
+                f_out.write(file.getbuffer())
 
-if process and prompts_file and uploaded_images and not st.session_state.processed:
-    st.session_state.processed = True
+        png_files = os.listdir(image_dir)
+        output_dir = os.path.join(tmpdir, "output_images")
+        os.makedirs(output_dir, exist_ok=True)
 
-    # --- Read prompts ---
-    prompts = [line.strip().replace("___ar_16:9___v_6___style_raw", "")
-               for line in prompts_file.read().decode("utf-8").splitlines() if line.strip()]
+        mapping_log = []
+        used_imgs = set()
+        # Core image-prompt mapping logic
+        for idx, prompt in enumerate(prompts, 1):
+            sanitized = "_".join(prompt.lower().replace(",", "")
+                                                 .replace("-", "")
+                                                 .replace("’", "")
+                                                 .replace("'", "")
+                                                 .replace(".", "")
+                                                 .replace(":", "")
+                                                 .replace("“", "")
+                                                 .replace("”", "")
+                                                 .split())
+            match = None
+            for img in png_files:
+                if sanitized in img.lower() and img not in used_imgs:
+                    match = img
+                    break
+            if match:
+                new_name = f"{idx:03}.png"
+                shutil.copy(os.path.join(image_dir, match), os.path.join(output_dir, new_name))
+                mapping_log.append(f"{match} -> {new_name} | {prompt}")
+                used_imgs.add(match)
+            else:
+                mapping_log.append(f"SKIPPED | {prompt}")
 
-    # --- Temporary folder ---
-    temp_dir = tempfile.mkdtemp()
+        # Zip outputs
+        out_zip = os.path.join(tmpdir, "renamed_images.zip")
+        import zipfile
+        with zipfile.ZipFile(out_zip, "w") as zipf:
+            for fname in os.listdir(output_dir):
+                zipf.write(os.path.join(output_dir, fname), arcname=fname)
 
-    # Save uploaded images
-    for file in uploaded_images:
-        with open(os.path.join(temp_dir, file.name), "wb") as f:
-            f.write(file.read())
+        # Downloadables
+        log_txt = "\n".join(mapping_log)
+        st.download_button("Download Renamed Images ZIP", open(out_zip, "rb"), "renamed_images.zip")
+        st.download_button("Download Mapping Log", log_txt, "mapping_log.txt")
+        st.success("Done! Outputs ready for download.")
 
-    # Get exact filenames
-    images = os.listdir(temp_dir)
-
-    mapping_data = []
-
-    # --- Perfect matching ---
-    for idx, prompt in enumerate(prompts, start=1):
-        # Normalize prompt and filenames for comparison
-        prompt_lower = prompt.lower().replace("-", " ").replace("’", "'").replace("'", "")
-        found = None
-
-        for img in images:
-            img_lower = img.lower().replace("-", " ").replace("’", "'").replace("'", "")
-            if prompt_lower in img_lower:
-                found = img
-                break
-
-        if found:
-            orig_path = os.path.join(temp_dir, found)
-            new_name = f"{idx:03d}.png"
-            new_path = os.path.join(temp_dir, new_name)
-            try:
-                os.rename(orig_path, new_path)
-                mapping_data.append({
-                    "Prompt_Number": idx,
-                    "Prompt": prompt,
-                    "Original_File": found,
-                    "New_File": new_name,
-                    "Status": "Renamed"
-                })
-            except Exception as e:
-                mapping_data.append({
-                    "Prompt_Number": idx,
-                    "Prompt": prompt,
-                    "Original_File": found,
-                    "New_File": "",
-                    "Status": f"Rename failed: {e}"
-                })
-        else:
-            mapping_data.append({
-                "Prompt_Number": idx,
-                "Prompt": prompt,
-                "Original_File": "",
-                "New_File": "",
-                "Status": "Missing"
-            })
-
-    # --- Save mapping CSV ---
-    mapping_df = pd.DataFrame(mapping_data)
-    mapping_csv_path = os.path.join(temp_dir, "mapping.csv")
-    mapping_df.to_csv(mapping_csv_path, index=False)
-
-    # --- Zip renamed images + mapping ---
-    zip_path = os.path.join(temp_dir, "renamed_images.zip")
-    with zipfile.ZipFile(zip_path, "w") as zipf:
-        for file in os.listdir(temp_dir):
-            zipf.write(os.path.join(temp_dir, file), arcname=file)
-
-    st.success("✅ All images processed perfectly! Missing images skipped safely.")
-    st.download_button("Download renamed images + mapping ZIP", zip_path)
-    st.dataframe(mapping_df)
