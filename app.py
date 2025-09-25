@@ -14,14 +14,33 @@ class PromptImageMatcher:
         self.similarity_threshold = similarity_threshold
         
     def clean_text(self, text: str) -> str:
+        # Remove URLs (http, https, www)
+        text = re.sub(r'https?://[^\s]+', '', text)
+        text = re.sub(r'www\.[^\s]+', '', text)
+        text = re.sub(r'[^\s]+\.(com|org|net|io|co|uk|edu|gov)[^\s]*', '', text)
+        
         # Remove UUID patterns
         text = re.sub(r'[a-f0-9]{8}[-_]?[a-f0-9]{4}[-_]?[a-f0-9]{4}[-_]?[a-f0-9]{4}[-_]?[a-f0-9]{12}', '', text, flags=re.IGNORECASE)
         text = re.sub(r'[a-f0-9]{6,}', '', text, flags=re.IGNORECASE)
+        
+        # Remove file extensions
         text = re.sub(r'\.(png|jpg|jpeg|gif|webp)$', '', text, flags=re.IGNORECASE)
+        
+        # Remove username prefix (anything before first underscore if it looks like username)
         text = re.sub(r'^[a-zA-Z0-9]+_', '', text)
+        
+        # Remove trailing underscores and numbers
         text = re.sub(r'_+\d*$', '', text)
+        
+        # Remove multiple underscores
         text = re.sub(r'_{2,}', '_', text)
-        text = text.strip('_')
+        
+        # Remove multiple spaces
+        text = re.sub(r'\s+', ' ', text)
+        
+        # Remove leading/trailing underscores and spaces
+        text = text.strip('_ ')
+        
         return text.lower()
     
     def calculate_similarity(self, str1: str, str2: str) -> float:
@@ -70,21 +89,20 @@ class PromptImageMatcher:
         available_filenames = set(filenames)
         
         for i, prompt in enumerate(prompts, 1):
+            # Store original prompt before cleaning
+            original_prompt = prompt
             prompt_text = re.sub(r'^\d+\.\s*', '', prompt).strip()
             
             candidates = list(available_filenames - used_filenames)
             match, score = self.find_best_match(prompt_text, candidates)
             
             if match:
-                # Generate new filename based on prompt order
-                new_filename = f"{i:03d}_{prompt_text[:50]}.png"  # Limit filename length
-                new_filename = re.sub(r'[<>:"/\\|?*]', '_', new_filename)  # Remove invalid chars
-                
                 results["matches"].append({
                     "prompt_number": i,
                     "prompt": prompt_text,
+                    "original_prompt": original_prompt,
                     "original_filename": match,
-                    "new_filename": new_filename,
+                    "new_filename": f"{i:03d}.png",  # Simple numbered filename
                     "file_data": uploaded_files[match],
                     "similarity_score": round(score, 3)
                 })
@@ -94,6 +112,7 @@ class PromptImageMatcher:
                 results["missing"].append({
                     "prompt_number": i,
                     "prompt": prompt_text,
+                    "original_prompt": original_prompt,
                     "best_score": round(score, 3)
                 })
                 results["summary"]["missing"] += 1
@@ -108,7 +127,7 @@ st.set_page_config(
 )
 
 st.title("🎯 Prompt-Image Matcher & Renamer")
-st.markdown("Match prompts to uploaded images and rename them according to prompt order")
+st.markdown("Match prompts to uploaded images and rename them to sequential numbers (001, 002, etc.)")
 
 # Sidebar for configuration
 with st.sidebar:
@@ -122,23 +141,20 @@ with st.sidebar:
         help="Minimum similarity score for fuzzy matching"
     )
     
-    naming_convention = st.selectbox(
-        "Naming Convention",
-        ["Sequential (001_prompt.png)", "Prompt only (prompt.png)", "Custom prefix"],
-        help="How to rename the matched images"
-    )
-    
-    if naming_convention == "Custom prefix":
-        custom_prefix = st.text_input("Custom prefix", "image")
+    st.markdown("---")
+    st.markdown("### 🔍 Text Cleaning")
+    st.info("The app automatically removes:")
+    st.markdown("""
+    - URLs (http://, https://, www.)
+    - Domain names (.com, .org, etc.)
+    - UUIDs and hex codes
+    - Username prefixes
+    - Extra underscores/spaces
+    """)
     
     st.markdown("---")
-    st.markdown("### 📋 Instructions")
-    st.markdown("""
-    1. **Upload prompts**: Text file with one prompt per line
-    2. **Upload images**: PNG files to match and rename
-    3. **Click Match**: Process and preview results
-    4. **Download**: Get renamed images as a ZIP file
-    """)
+    st.markdown("### 📋 Output Format")
+    st.success("Images will be renamed as: 001.png, 002.png, 003.png, etc.")
 
 # Main content area
 col1, col2 = st.columns(2)
@@ -150,14 +166,14 @@ with col1:
     uploaded_prompt_file = st.file_uploader(
         "Upload prompts file (.txt)",
         type=['txt'],
-        help="Text file with one prompt per line"
+        help="Text file with one prompt per line (links will be automatically removed)"
     )
     
     # Text area for manual prompt input
     prompt_text = st.text_area(
         "Or paste prompts here (one per line)",
         height=200,
-        placeholder="1. An_English_sailor_writes_a_heartfelt_letter_to_his_wife\n2. A_cat_sleeping_on_a_window_with_sunlight\n3. A_futuristic_city_with_flying_cars"
+        placeholder="1. An_English_sailor_writes_a_heartfelt_letter_to_his_wife https://example.com/reference\n2. A_cat_sleeping_on_a_window_with_sunlight\n3. A_futuristic_city_with_flying_cars www.midjourney.com"
     )
 
 with col2:
@@ -244,9 +260,14 @@ if st.button("🔍 Match & Prepare Rename", type="primary", use_container_width=
         # Show missing prompts
         if results["missing"]:
             with st.expander(f"❌ Missing Images ({len(results['missing'])})"):
-                missing_df = pd.DataFrame(results["missing"])
+                missing_df = pd.DataFrame([{
+                    "prompt_number": m["prompt_number"],
+                    "prompt": m["prompt"],
+                    "original_prompt": m["original_prompt"],
+                    "best_score": m["best_score"]
+                } for m in results["missing"]])
                 st.dataframe(
-                    missing_df[["prompt_number", "prompt", "best_score"]],
+                    missing_df,
                     use_container_width=True,
                     hide_index=True
                 )
@@ -264,7 +285,8 @@ if 'results' in st.session_state and st.session_state['results']['matches']:
         for match in st.session_state['results']['matches']:
             mapping_data.append({
                 "prompt_number": match["prompt_number"],
-                "prompt": match["prompt"],
+                "original_prompt": match["original_prompt"],
+                "cleaned_prompt": match["prompt"],
                 "original_filename": match["original_filename"],
                 "new_filename": match["new_filename"],
                 "similarity_score": match["similarity_score"]
@@ -289,17 +311,13 @@ if 'results' in st.session_state and st.session_state['results']['matches']:
                 
                 with zipfile.ZipFile(zip_buffer, 'w', zipfile.ZIP_DEFLATED) as zip_file:
                     for match in st.session_state['results']['matches']:
+                        # Reset file pointer to beginning
+                        match["file_data"].seek(0)
                         # Get the image data
-                        img_data = match["file_data"].getvalue()
+                        img_data = match["file_data"].read()
                         
-                        # Determine filename based on naming convention
-                        if naming_convention == "Sequential (001_prompt.png)":
-                            filename = match["new_filename"]
-                        elif naming_convention == "Prompt only (prompt.png)":
-                            prompt_clean = re.sub(r'[<>:"/\\|?*]', '_', match["prompt"][:100])
-                            filename = f"{prompt_clean}.png"
-                        else:  # Custom prefix
-                            filename = f"{custom_prefix}_{match['prompt_number']:03d}.png"
+                        # Use simple numbered filename
+                        filename = match["new_filename"]  # This is already set to "001.png", "002.png", etc.
                         
                         # Add to ZIP
                         zip_file.writestr(filename, img_data)
