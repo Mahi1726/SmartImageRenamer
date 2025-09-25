@@ -118,4 +118,184 @@ with st.sidebar:
     st.markdown("""
     1. **Upload prompts**: Text file with one prompt per line
     2. **Enter image filenames**: One per line in the text area
+    3. **Click Match**: Process and view results
+    4. **Download results**: Get your matches in various formats
+    """)
+
+# Main content area
+col1, col2 = st.columns(2)
+
+with col1:
+    st.header("📝 Input Prompts")
     
+    # File upload for prompts
+    uploaded_file = st.file_uploader(
+        "Upload prompts file (.txt)",
+        type=['txt'],
+        help="Text file with one prompt per line"
+    )
+    
+    # Text area for manual prompt input
+    prompt_text = st.text_area(
+        "Or paste prompts here (one per line)",
+        height=200,
+        placeholder="1. An_English_sailor_writes_a_heartfelt_letter_to_his_wife\n2. A_cat_sleeping_on_a_window_with_sunlight\n3. A_futuristic_city_with_flying_cars"
+    )
+
+with col2:
+    st.header("🖼️ Image Filenames")
+    
+    # Text area for image filenames
+    image_filenames_text = st.text_area(
+        "Enter image filenames (one per line)",
+        height=200,
+        placeholder="asif4876_An_English_sailor_writes_a_heartfelt_letter_to_his_w_172bb4b0.png\nuser9_A_futuristic_city_with_flying_cars_8ff92123.png"
+    )
+
+# Process button
+if st.button("🔍 Match Prompts to Images", type="primary", use_container_width=True):
+    # Get prompts
+    prompts = []
+    if uploaded_file is not None:
+        stringio = StringIO(uploaded_file.getvalue().decode("utf-8"))
+        prompts = [line.strip() for line in stringio if line.strip()]
+    elif prompt_text:
+        prompts = [line.strip() for line in prompt_text.split('\n') if line.strip()]
+    
+    # Get image filenames
+    image_filenames = [line.strip() for line in image_filenames_text.split('\n') if line.strip()]
+    
+    # Validate inputs
+    if not prompts:
+        st.error("❌ Please provide prompts either by uploading a file or entering them manually.")
+    elif not image_filenames:
+        st.error("❌ Please enter image filenames.")
+    else:
+        # Create matcher and process
+        matcher = PromptImageMatcher(similarity_threshold=similarity_threshold)
+        
+        with st.spinner("Processing matches..."):
+            results = matcher.match_prompts_to_images(prompts, image_filenames)
+        
+        # Display results
+        st.markdown("---")
+        st.header("📊 Results")
+        
+        # Summary metrics
+        col1, col2, col3 = st.columns(3)
+        with col1:
+            st.metric("Total Prompts", results["summary"]["total_prompts"])
+        with col2:
+            st.metric("Matched", results["summary"]["matched"], 
+                     delta=f"{results['summary']['matched']/results['summary']['total_prompts']*100:.1f}%")
+        with col3:
+            st.metric("Missing", results["summary"]["missing"])
+        
+        # Detailed results in tabs
+        tab1, tab2, tab3 = st.tabs(["✅ Matches", "❌ Missing", "📄 Full Log"])
+        
+        with tab1:
+            if results["matches"]:
+                matches_df = pd.DataFrame(results["matches"])
+                st.dataframe(
+                    matches_df[["prompt_number", "prompt", "image", "similarity_score"]],
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.info("No matches found.")
+        
+        with tab2:
+            if results["missing"]:
+                missing_df = pd.DataFrame(results["missing"])
+                st.dataframe(
+                    missing_df[["prompt_number", "prompt", "best_score"]],
+                    use_container_width=True,
+                    hide_index=True
+                )
+            else:
+                st.success("All prompts matched!")
+        
+        with tab3:
+            # Generate full log
+            log_lines = []
+            all_results = []
+            
+            for match in results["matches"]:
+                all_results.append((
+                    match["prompt_number"], 
+                    f"Prompt {match['prompt_number']} → {match['image']} (score: {match['similarity_score']})"
+                ))
+            
+            for missing in results["missing"]:
+                all_results.append((
+                    missing["prompt_number"], 
+                    f"Prompt {missing['prompt_number']} → missing (best score: {missing['best_score']})"
+                ))
+            
+            all_results.sort(key=lambda x: x[0])
+            
+            for _, line in all_results:
+                log_lines.append(line)
+            
+            log_text = "\n".join(log_lines)
+            st.text_area("Full Log", log_text, height=300)
+        
+        # Download options
+        st.markdown("---")
+        st.header("💾 Download Results")
+        
+        col1, col2, col3 = st.columns(3)
+        
+        with col1:
+            # Download as text log
+            st.download_button(
+                label="📄 Download as Text",
+                data=log_text,
+                file_name="matching_results.txt",
+                mime="text/plain"
+            )
+        
+        with col2:
+            # Download as JSON
+            json_str = json.dumps(results, indent=2)
+            st.download_button(
+                label="📊 Download as JSON",
+                data=json_str,
+                file_name="matching_results.json",
+                mime="application/json"
+            )
+        
+        with col3:
+            # Download as CSV
+            all_data = []
+            for match in results["matches"]:
+                all_data.append({
+                    "prompt_number": match["prompt_number"],
+                    "prompt": match["prompt"],
+                    "status": "matched",
+                    "image": match["image"],
+                    "score": match["similarity_score"]
+                })
+            for missing in results["missing"]:
+                all_data.append({
+                    "prompt_number": missing["prompt_number"],
+                    "prompt": missing["prompt"],
+                    "status": "missing",
+                    "image": "",
+                    "score": missing["best_score"]
+                })
+            
+            if all_data:
+                df = pd.DataFrame(all_data)
+                csv = df.to_csv(index=False)
+                st.download_button(
+                    label="📑 Download as CSV",
+                    data=csv,
+                    file_name="matching_results.csv",
+                    mime="text/csv"
+                )
+
+# Footer
+st.markdown("---")
+st.markdown("Made with ❤️ using Streamlit")
